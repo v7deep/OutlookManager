@@ -5,12 +5,9 @@ HOST=${HOST:-"0.0.0.0"}
 PORT=${PORT:-8000}
 WORKERS=${WORKERS:-1}
 
-# 创建必要的目录
-mkdir -p /app/data
-
 # 如果accounts.json不存在，创建空的
-if [ ! -f "/app/accounts.json" ]; then
-    echo "{}" > /app/accounts.json
+if [ ! -f "/app/data/accounts.json" ]; then
+    echo "{}" > /app/data/accounts.json
 fi
 
 # 不再需要更改文件所有权，因为我们使用root用户运行容器

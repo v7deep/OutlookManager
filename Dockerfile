@@ -15,36 +15,21 @@ RUN apk add --no-cache \
     gcc \
     musl-dev \
     libffi-dev \
-    openssl-dev
-
-# 创建非root用户
-RUN adduser -D -s /bin/sh appuser
+    openssl-dev \
+    dos2unix
 
 # 复制requirements文件并安装Python依赖
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 复制应用代码
-COPY main.py .
-COPY config.py .
-COPY static/ ./static/
-COPY docker-entrypoint.sh .
+COPY . .
 
-# 设置启动脚本权限
-RUN chmod +x docker-entrypoint.sh
-
-# 创建数据目录用于持久化存储
-RUN mkdir -p /app/data && chown appuser:appuser /app/data
-
-# 切换到非root用户
-USER appuser
-
-# 暴露端口
-EXPOSE 8000
+RUN dos2unix /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 
 # 健康检查
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
     CMD python -c "import requests; requests.get('http://localhost:8000/api')" || exit 1
 
 # 启动命令
-CMD ["./docker-entrypoint.sh"] 
+CMD ["/app/entrypoint.sh"]
