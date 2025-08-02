@@ -3,11 +3,10 @@ import json
 import logging
 import email
 import re
-from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Any, Union
+from datetime import datetime
+from typing import Optional, List, Dict, Union
 from pathlib import Path
 import time
-from functools import lru_cache
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Depends, status
@@ -28,7 +27,7 @@ from config import verify_admin_password, get_config_info
 # 配置常量
 # ============================================================================
 
-ACCOUNTS_FILE = "accounts.json"
+ACCOUNTS_FILE = "./data/accounts.json"
 TOKEN_URL = "https://login.microsoftonline.com/consumers/oauth2/v2.0/token"
 IMAP_SERVER = "outlook.live.com"
 IMAP_PORT = 993
@@ -67,6 +66,35 @@ class AccountVerificationResult(BaseModel):
     status: str  # "success" 或 "error"
     message: str = ""
     credentials: Optional[AccountCredentials] = None
+
+
+class MetadataUpdateRequest(BaseModel):
+    metadata: Dict[str, str]
+
+
+class MetadataResponse(BaseModel):
+    email: EmailStr
+    metadata: Optional[Dict[str, str]] = None
+    message: str = ""
+
+
+class MetadataUpdateRequest(BaseModel):
+    metadata: Dict[str, str]
+
+
+class MetadataResponse(BaseModel):
+    email: EmailStr
+    metadata: Optional[Dict[str, str]] = None
+    message: str = ""
+
+
+class BatchMetadataRequest(BaseModel):
+    operations: List[Dict[str, Union[str, Dict[str, str]]]]  # [{"email": "...", "metadata": {...}}, ...]
+
+
+class BatchMetadataResponse(BaseModel):
+    results: List[MetadataResponse]
+    summary: Dict[str, int]  # {"success": 0, "failed": 0}
 
 
 class EmailItem(BaseModel):
@@ -346,6 +374,126 @@ async def delete_accounts(emails: List[str]) -> Dict[str, int]:
     except Exception as e:
         logger.error(f"Error deleting accounts: {e}")
         raise HTTPException(status_code=500, detail="Failed to delete accounts")
+
+
+# ============================================================================
+# Metadata管理模块
+# ============================================================================
+
+async def get_account_metadata(email_id: str) -> Optional[Dict[str, str]]:
+    """获取指定账户的metadata"""
+    try:
+        if not Path(ACCOUNTS_FILE).exists():
+            raise HTTPException(status_code=404, detail="Account not found")
+
+        with open(ACCOUNTS_FILE, 'r', encoding='utf-8') as f:
+            accounts = json.load(f)
+
+        if email_id not in accounts:
+            raise HTTPException(status_code=404, detail="Account not found")
+
+        return accounts[email_id].get('metadata', None)
+    except HTTPException:
+        raise  # 重新抛出HTTPException
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="Failed to read accounts file")
+    except Exception as e:
+        logger.error(f"Error getting account metadata: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+async def update_account_metadata(email_id: str, metadata: Dict[str, str]) -> None:
+    """更新指定账户的metadata"""
+    try:
+        if not Path(ACCOUNTS_FILE).exists():
+            raise HTTPException(status_code=404, detail="Account not found")
+
+        await asyncio.to_thread(_update_metadata_sync, email_id, metadata)
+        logger.info(f"Updated metadata for {email_id}")
+    except HTTPException:
+        raise  # 重新抛出HTTPException
+    except Exception as e:
+        logger.error(f"Error updating account metadata: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update metadata")
+
+
+def _update_metadata_sync(email_id: str, metadata: Dict[str, str]):
+    """同步更新metadata函数"""
+    with open(ACCOUNTS_FILE, 'r', encoding='utf-8') as f:
+        accounts = json.load(f)
+
+    if email_id not in accounts:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    accounts[email_id]['metadata'] = metadata
+
+    with open(ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(accounts, f, indent=2, ensure_ascii=False)
+
+
+async def delete_account_metadata(email_id: str) -> None:
+    """删除指定账户的metadata"""
+    try:
+        if not Path(ACCOUNTS_FILE).exists():
+            raise HTTPException(status_code=404, detail="Account not found")
+
+        await asyncio.to_thread(_delete_metadata_sync, email_id)
+        logger.info(f"Deleted metadata for {email_id}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting account metadata: {e}")
+        raise HTTPException(status_code=500, detail="Failed to delete metadata")
+
+
+def _delete_metadata_sync(email_id: str):
+    """同步删除metadata函数"""
+    with open(ACCOUNTS_FILE, 'r', encoding='utf-8') as f:
+        accounts = json.load(f)
+
+    if email_id not in accounts:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    if 'metadata' in accounts[email_id]:
+        del accounts[email_id]['metadata']
+
+    with open(ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(accounts, f, indent=2, ensure_ascii=False)
+
+
+async def patch_account_metadata(email_id: str, metadata_patch: Dict[str, str]) -> Dict[str, str]:
+    """部分更新指定账户的metadata"""
+    try:
+        if not Path(ACCOUNTS_FILE).exists():
+            raise HTTPException(status_code=404, detail="Account not found")
+
+        return await asyncio.to_thread(_patch_metadata_sync, email_id, metadata_patch)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error patching account metadata: {e}")
+        raise HTTPException(status_code=500, detail="Failed to patch metadata")
+
+
+def _patch_metadata_sync(email_id: str, metadata_patch: Dict[str, str]) -> Dict[str, str]:
+    """同步部分更新metadata函数"""
+    with open(ACCOUNTS_FILE, 'r', encoding='utf-8') as f:
+        accounts = json.load(f)
+
+    if email_id not in accounts:
+        raise HTTPException(status_code=404, detail="Account not found")
+
+    # 获取现有metadata或创建新的
+    current_metadata = accounts[email_id].get('metadata', {})
+
+    # 合并更新
+    current_metadata.update(metadata_patch)
+    accounts[email_id]['metadata'] = current_metadata
+
+    with open(ACCOUNTS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(accounts, f, indent=2, ensure_ascii=False)
+
+    return current_metadata
 
 
 # ============================================================================
@@ -874,40 +1022,96 @@ async def register_single_account(credentials: AccountCredentials) -> AccountRes
 @app.get("/accounts", response_model=List[AccountStatus])
 async def get_accounts(
         check_status: bool = False,
+        status_filter: Optional[str] = Query(None, pattern="^(active|inactive|unknown)$"),
+        has_metadata: Optional[bool] = Query(None),
+        mk: Optional[str] = Query(None, description="Metadata key to filter by"),
+        v: Optional[str] = Query(None, description="Metadata value to match"),
+        nil: Optional[bool] = Query(False, description="Include accounts where metadata key is empty/null"),
         current_admin: bool = Depends(get_current_admin)
 ):
-    """获取所有账户列表，可选择检查账户活性状态
-    
+    """获取所有账户列表，支持筛选条件
+
     Args:
         check_status: 是否检查账户活性状态
+        status_filter: 按状态筛选 (active/inactive/unknown)
+        has_metadata: 按metadata是否存在筛选 (true: 有metadata, false: 无metadata, null: 不筛选)
+        mk: metadata字段名 (metadata key)
+        v: metadata字段值 (metadata value)
+        nil: 是否包含该字段为空/不存在的账户 (默认false)
     """
     accounts = await get_all_accounts()
 
     if not check_status:
         # 仅返回邮箱列表，不检查状态
-        return [AccountStatus(email=email, metadata=accounts[email].get('metadata', None)) for email in accounts.keys()]
+        result = [AccountStatus(email=email, metadata=accounts[email].get('metadata', None)) for email in accounts.keys()]
+    else:
+        # 并行检查所有账户的活性
+        result = []
+        tasks = []
 
-    # 并行检查所有账户的活性
-    result = []
-    tasks = []
+        for email, account_data in accounts.items():
+            credentials = AccountCredentials(
+                email=email,
+                refresh_token=account_data['refresh_token'],
+                client_id=account_data['client_id']
+            )
+            # 创建异步任务
+            task = asyncio.create_task(check_account_status(credentials))
+            tasks.append((email, task))
 
-    for email, account_data in accounts.items():
-        credentials = AccountCredentials(
-            email=email,
-            refresh_token=account_data['refresh_token'],
-            client_id=account_data['client_id']
-        )
-        # 创建异步任务
-        task = asyncio.create_task(check_account_status(credentials))
-        tasks.append((email, task))
+        # 等待所有任务完成
+        for email, task in tasks:
+            is_active = await task
+            status = "active" if is_active else "inactive"
+            result.append(AccountStatus(email=email, status=status, metadata=accounts[email].get('metadata', None)))
 
-    # 等待所有任务完成
-    for email, task in tasks:
-        is_active = await task
-        status = "active" if is_active else "inactive"
-        result.append(AccountStatus(email=email, status=status, metadata=accounts[email].get('metadata', None)))
+    # 应用筛选条件
+    filtered_result = []
+    for account in result:
+        # 状态筛选
+        if status_filter is not None and account.status != status_filter:
+            continue
 
-    return result
+        # metadata筛选
+        if has_metadata is not None:
+            account_has_metadata = account.metadata is not None and len(account.metadata) > 0
+            if has_metadata and not account_has_metadata:
+                continue
+            if not has_metadata and account_has_metadata:
+                continue
+
+        # metadata字段级筛选
+        if mk is not None:
+            # 检查指定的metadata字段
+            metadata_dict = account.metadata or {}
+            field_value = metadata_dict.get(mk)
+
+            # 判断是否匹配条件
+            match_found = False
+
+            # 如果指定了值，检查是否匹配
+            if v is not None:
+                if field_value == v:
+                    match_found = True
+
+            # 如果启用了nil，检查空值条件
+            if nil:
+                # nil=true: 包含字段不存在或为空的情况
+                if mk not in metadata_dict or field_value is None or field_value == "":
+                    match_found = True
+
+            # 如果既没有指定v也没有启用nil，则检查字段是否存在且非空
+            if v is None and not nil:
+                if mk in metadata_dict and field_value is not None and field_value != "":
+                    match_found = True
+
+            # 如果没有匹配任何条件，跳过此账户
+            if not match_found:
+                continue
+
+        filtered_result.append(account)
+
+    return filtered_result
 
 
 async def check_account_status(credentials: AccountCredentials) -> bool:
@@ -977,7 +1181,9 @@ async def api_status():
         "endpoints": {
             "register_account": "POST /accounts",
             "get_emails": "GET /emails/{email_id}",
-            "get_email_detail": "GET /emails/{email_id}/{message_id}"
+            "get_email_detail": "GET /emails/{email_id}/{message_id}",
+            "get_email_metadata": "GET /accounts/{email_id}/metadata",
+            "update_email_metadata": "PUT /accounts/{email_id}/metadata",
         }
     }
 
@@ -1104,10 +1310,10 @@ async def delete_multiple_accounts(
         current_admin: bool = Depends(get_current_admin)
 ):
     """批量删除账户
-    
+
     Args:
         request: 包含要删除的邮箱地址列表的请求
-    
+
     Returns:
         删除操作的结果统计
     """
@@ -1119,6 +1325,50 @@ async def delete_multiple_accounts(
         "message": f"成功删除 {result['deleted']} 个账户，{result['not_found']} 个账户未找到",
         **result
     }
+
+
+@app.get("/accounts/{email_id}/metadata", response_model=MetadataResponse)
+async def get_metadata(
+        email_id: str,
+        current_admin: bool = Depends(get_current_admin)
+):
+    """获取指定账户的metadata
+
+    Args:
+        email_id: 邮箱地址
+
+    Returns:
+        账户的metadata信息
+    """
+    metadata = await get_account_metadata(email_id)
+    return MetadataResponse(
+        email=email_id,
+        metadata=metadata,
+        message="Metadata retrieved successfully" if metadata else "No metadata found"
+    )
+
+
+@app.put("/accounts/{email_id}/metadata", response_model=MetadataResponse)
+async def update_metadata(
+        email_id: str,
+        request: MetadataUpdateRequest,
+        current_admin: bool = Depends(get_current_admin)
+):
+    """更新指定账户的metadata
+
+    Args:
+        email_id: 邮箱地址
+        request: 包含metadata的更新请求
+
+    Returns:
+        更新后的metadata信息
+    """
+    await update_account_metadata(email_id, request.metadata)
+    return MetadataResponse(
+        email=email_id,
+        metadata=request.metadata,
+        message="Metadata updated successfully"
+    )
 
 
 # ============================================================================
